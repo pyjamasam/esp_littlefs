@@ -455,6 +455,22 @@ TEST_CASE("multiple tasks can use same volume", "[littlefs]")
     test_teardown();
 }
 
+TEST_CASE("base_path '/'", "[littlefs]")
+{
+    const esp_vfs_littlefs_conf_t conf = {
+        .base_path = "/",
+        .partition_label = littlefs_test_partition_label,
+        .format_if_mount_failed = true
+    };
+    TEST_ESP_OK(esp_vfs_littlefs_register(&conf));
+    TEST_ASSERT_TRUE( heap_caps_check_integrity_all(true) );
+
+    test_littlefs_create_file_with_text("/hello.txt", littlefs_test_hello_str);
+    test_littlefs_read_file("/hello.txt");
+
+    test_teardown();
+}
+
 #if CONFIG_LITTLEFS_USE_MTIME
 
 #if CONFIG_LITTLEFS_MTIME_USE_SECONDS
