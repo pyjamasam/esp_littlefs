@@ -1047,6 +1047,7 @@ TEST_CASE("Full filesystem writes", "[littlefs]")
         for(;;){
             for(uint8_t i=0; i < N_FILES; i++){
                 if(0 == fwrite(&data, 1, 1, f[i])){
+                    printf("File %i fwrite returned 0\n", i);
                     goto exit;
                 }
                 expected_bytes++;
@@ -1055,7 +1056,7 @@ TEST_CASE("Full filesystem writes", "[littlefs]")
 
 exit:
         for(uint8_t i=0; i < N_FILES; i++){
-            fclose(f[i]);
+            TEST_ASSERT_EQUAL_INT(0, fclose(f[i]));
         }
 
         size_t actual_bytes = 0;
@@ -1066,6 +1067,7 @@ exit:
             snprintf(name, sizeof(name), littlefs_base_path "/%d.bin", i);
 
 			stat(name, &st);
+            printf("File %i is %ld long\n", i, st.st_size);
 			actual_bytes += st.st_size;
         }
 
