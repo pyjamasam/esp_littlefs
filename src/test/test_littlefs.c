@@ -1001,6 +1001,84 @@ TEST_CASE("Rewriting file frees space immediately (#7426)", "[littlefs]")
     test_teardown();
 }
 
+TEST_CASE("Full filesystem writes", "[littlefs]")
+{
+    test_setup();
+
+    size_t total = 0, used = 0;
+    TEST_ESP_OK(esp_littlefs_info(littlefs_test_partition_label, &total, &used));
+
+    /* Create a file that takes up a good chunk of space */
+    {
+        size_t bulk_write = total - used - 100000;
+        FILE *f = fopen(littlefs_base_path "/bulk.bin", "w");
+        TEST_ASSERT_NOT_NULL(f);
+
+        printf("Bulk writing %d bytes\n", bulk_write);
+
+        uint8_t buf[1024];
+        memset(buf, 0xaa, 1024);
+        while(bulk_write > 0){
+            if(bulk_write > 1024) {
+                TEST_ASSERT_EQUAL_INT(1024, fwrite(buf, 1, 1024, f));
+                bulk_write -= 1024;
+            }
+            else{
+                TEST_ASSERT_EQUAL_INT(bulk_write, fwrite(buf, 1, bulk_write, f));
+                break;
+            }
+        }
+        fclose(f);
+    }
+
+#define N_FILES 7
+
+    {
+        FILE *f[N_FILES];
+        for(uint8_t i=0; i < N_FILES; i++){
+            char name[64];
+            snprintf(name, sizeof(name), littlefs_base_path "/%d.bin", i);
+            f[i] = fopen(name, "w");
+            TEST_ASSERT_NOT_NULL(f[i]);
+        }
+
+        size_t expected_bytes = 0;
+        const char data = 'b';
+        for(;;){
+            for(uint8_t i=0; i < N_FILES; i++){
+                if(0 == fwrite(&data, 1, 1, f[i])){
+                    goto exit;
+                }
+                expected_bytes++;
+            }
+        }
+
+exit:
+        for(uint8_t i=0; i < N_FILES; i++){
+            fclose(f[i]);
+        }
+
+        size_t actual_bytes = 0;
+        for(uint8_t i=0; i < N_FILES; i++){
+			struct stat st;
+
+            char name[64];
+            snprintf(name, sizeof(name), littlefs_base_path "/%d.bin", i);
+
+			stat(name, &st);
+			actual_bytes += st.st_size;
+        }
+
+#undef N_FILES
+        printf("total: %d\n", total);
+        printf("used: %d\n", used);
+        printf("expected_bytes: %d\n", expected_bytes);
+        printf("actual_bytes:   %d\n", actual_bytes);
+    }
+
+    test_teardown();
+}
+
 static void test_setup() {
     esp_littlefs_format(littlefs_test_partition_label);
     const esp_vfs_littlefs_conf_t conf = {
