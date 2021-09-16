@@ -14,7 +14,6 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/poll.h>
-#include <dirent.h>
 #include <string.h>
 #include "sdkconfig.h"
 
@@ -22,6 +21,7 @@
 
 #ifdef __cplusplus
 extern "C" {
+#include <dirent.h>
 #endif
 
 /**
