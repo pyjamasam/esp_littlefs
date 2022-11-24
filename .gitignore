@@ -2,3 +2,10 @@ build/
 sdkconfig
 sdkconfig.old
 mklittlefs/mklittlefs
+
+example/build/
+example/sdkconfig
+example/sdkconfig.old
+example/dependencies.lock
+
+*.DS_Store

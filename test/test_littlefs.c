@@ -1,6 +1,7 @@
 //#define LOG_LOCAL_LEVEL 4
 
 #include "esp_littlefs.h"
+#include "sdkconfig.h"
 
 #include <stdio.h>
 #include <fcntl.h>
@@ -14,7 +15,6 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_vfs.h"
-#include "esp_littlefs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -22,6 +22,13 @@
 #include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "errno.h"
+#include "esp_idf_version.h"
+
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(4, 3, 0)
+#define esp_rom_printf ets_printf
+#else
+#include "esp_rom_sys.h"
+#endif
 
 
 static const char littlefs_test_partition_label[] = "flash_test";
@@ -214,19 +221,84 @@ TEST_CASE("can lseek", "[littlefs]")
     TEST_ASSERT_EQUAL('8', fgetc(f));
     TEST_ASSERT_EQUAL(0, fseek(f, 0, SEEK_END));
     TEST_ASSERT_EQUAL(11, ftell(f));
+    // Appending to end
     TEST_ASSERT_EQUAL(4, fprintf(f, "abc\n"));
     TEST_ASSERT_EQUAL(0, fseek(f, 0, SEEK_END));
     TEST_ASSERT_EQUAL(15, ftell(f));
+    // Appending past end of file, creating a "hole"
+    TEST_ASSERT_EQUAL(0, fseek(f, 2, SEEK_END));
+    TEST_ASSERT_EQUAL(4, fprintf(f, "foo\n"));
     TEST_ASSERT_EQUAL(0, fseek(f, 0, SEEK_SET));
-    char buf[20];
-    TEST_ASSERT_EQUAL(15, fread(buf, 1, sizeof(buf), f));
-    const char ref_buf[] = "0123456789\nabc\n";
+    char buf[32];
+    TEST_ASSERT_EQUAL(21, fread(buf, 1, sizeof(buf), f));
+    const char ref_buf[] = "0123456789\nabc\n\0\0foo\n";
     TEST_ASSERT_EQUAL_INT8_ARRAY(ref_buf, buf, sizeof(ref_buf) - 1);
 
+    // Error checking
+    // Attempting to seek before the beginning of file should return an error
+    TEST_ASSERT_EQUAL(-1, fseek(f, 100, 100));  // Bad mode
+    TEST_ASSERT_EQUAL(EINVAL, errno);
+    TEST_ASSERT_EQUAL(-1, fseek(f, -1, SEEK_SET)); // Seeking to before start of file
+    TEST_ASSERT_EQUAL(EINVAL, errno);
+
+
     TEST_ASSERT_EQUAL(0, fclose(f));
+    test_teardown();
+}
+
+TEST_CASE("truncate", "[littlefs]")
+{
+    test_setup();
+
+    FILE* f;
+    char buf[10] = { 0 };
+    const char fn[] = littlefs_base_path "/truncate.txt";
+
+    f = fopen(fn, "w");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL(11, fprintf(f, "0123456789\n"));
+    TEST_ASSERT_EQUAL(0, fclose(f));
+
+    TEST_ASSERT_EQUAL(0, truncate(fn, 3));
+
+    f = fopen(fn, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL(3, fread(buf, 1, 8, f));
+    TEST_ASSERT_EQUAL(0, fclose(f));
+    TEST_ASSERT_EQUAL_STRING_LEN("012", buf, 8);
 
     test_teardown();
 }
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 2)
+TEST_CASE("ftruncate", "[littlefs]")
+{
+    test_setup();
+
+    int fd;
+    FILE* f;
+    char buf[10] = { 0 };
+    const char fn[] = littlefs_base_path "/truncate.txt";
+
+    f = fopen(fn, "w");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL(11, fprintf(f, "0123456789\n"));
+    TEST_ASSERT_EQUAL(0, fclose(f));
+
+    fd = open(fn, O_RDWR);
+    TEST_ASSERT_EQUAL(0, ftruncate(fd, 3));
+    TEST_ASSERT_EQUAL(0, close(fd));
+
+
+    f = fopen(fn, "r");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL(3, fread(buf, 1, 8, f));
+    TEST_ASSERT_EQUAL(0, fclose(f));
+    TEST_ASSERT_EQUAL_STRING_LEN("012", buf, 8);
+
+    test_teardown();
+}
+#endif // ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 2)
 
 
 TEST_CASE("stat/fstat returns correct values", "[littlefs]")
@@ -247,7 +319,7 @@ TEST_CASE("stat/fstat returns correct values", "[littlefs]")
             FILE *f = fopen(filename, "r");
             TEST_ASSERT_NOT_NULL(f);
             TEST_ASSERT_EQUAL(0, fstat(fileno(f), &st));
-            fclose(f);
+            TEST_ASSERT_EQUAL(0, fclose(f));
 #endif
         }
         TEST_ASSERT(st.st_mode & S_IFREG);
@@ -353,7 +425,10 @@ TEST_CASE("mkdir, rmdir", "[littlefs]")
     TEST_ASSERT_TRUE(st.st_mode & S_IFDIR);
     TEST_ASSERT_FALSE(st.st_mode & S_IFREG);
     TEST_ASSERT_EQUAL(0, rmdir(name_dir1));
-    TEST_ASSERT_EQUAL(-2, stat(name_dir1, &st));
+
+    // Attempt to stat a removed directory
+    TEST_ASSERT_EQUAL(-1, stat(name_dir1, &st));
+    TEST_ASSERT_EQUAL(ENOENT, errno);
 
     TEST_ASSERT_EQUAL(0, mkdir(name_dir2, 0755));
     test_littlefs_create_file_with_text(name_dir2_file, "foo\n");
@@ -363,7 +438,11 @@ TEST_CASE("mkdir, rmdir", "[littlefs]")
     TEST_ASSERT_EQUAL(0, stat(name_dir2_file, &st));
     TEST_ASSERT_FALSE(st.st_mode & S_IFDIR);
     TEST_ASSERT_TRUE(st.st_mode & S_IFREG);
+
+    // Can't remove directory, its not empty
     TEST_ASSERT_EQUAL(-1, rmdir(name_dir2));
+    TEST_ASSERT_EQUAL(ENOTEMPTY, errno);
+
     TEST_ASSERT_EQUAL(0, unlink(name_dir2_file));
 #if !CONFIG_LITTLEFS_SPIFFS_COMPAT
     /* this will have already been deleted */
@@ -494,7 +573,7 @@ TEST_CASE("esp_littlefs_info", "[littlefs]")
     for(int i=0; i < n_bytes; i++) {
         TEST_ASSERT_EQUAL(1, fwrite(&val, 1, 1, f));
     }
-    fclose(f);
+    TEST_ASSERT_EQUAL(0, fclose(f));
 
     /* Re-check system size */
     size_t total_new = 0, used_new = 0;
@@ -542,7 +621,7 @@ TEST_CASE("mtime support", "[littlefs]")
     printf("mtime=%d\n", (int) st.st_mtime);
     TEST_ASSERT(st.st_mtime >= t_before_open
              && st.st_mtime <= t_after_open);
-    fclose(f);
+    TEST_ASSERT_EQUAL(0, fclose(f));
 
     /* Wait a bit, open for reading, check that mtime is not updated */
     vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -553,7 +632,7 @@ TEST_CASE("mtime support", "[littlefs]")
     TEST_ASSERT(t_before_open_ro > t_after_open
              && st.st_mtime >= t_before_open
              && st.st_mtime <= t_after_open);
-    fclose(f);
+    TEST_ASSERT_EQUAL(0, fclose(f));
 
     TEST_ASSERT_EQUAL(0, unlink(filename));
 
@@ -588,7 +667,7 @@ TEST_CASE("mnonce support", "[littlefs]")
     else {
         TEST_ASSERT_EQUAL_INT(1, nonce2-nonce1);
     }
-    fclose(f);
+    TEST_ASSERT_EQUAL(0, fclose(f));
 
     /* open for reading, check that mtime is not updated */
     int nonce3;
@@ -597,7 +676,7 @@ TEST_CASE("mnonce support", "[littlefs]")
     nonce3 = (int) st.st_mtime;
     printf("mtime=%d\n", (int) st.st_mtime);
     TEST_ASSERT_EQUAL_INT(nonce2, nonce3);
-    fclose(f);
+    TEST_ASSERT_EQUAL(0, fclose(f));
 
     TEST_ASSERT_EQUAL(0, unlink(filename));
 
@@ -788,7 +867,7 @@ static void test_littlefs_open_max_files(const char* filename_prefix, size_t fil
     }
     /* close everything and clean up */
     for (size_t i = 0; i < files_count; ++i) {
-        fclose(files[i]);
+        TEST_ASSERT_EQUAL(0, fclose(files[i]));
         TEST_ASSERT_TRUE( heap_caps_check_integrity_all(true) );
     }
     free(files);
@@ -837,7 +916,7 @@ static void read_write_task(void* param)
         if (args->action == CONCURRENT_TASK_ACTION_WRITE) {
             int cnt = fwrite(&val, sizeof(val), 1, f);
             if (cnt != 1) {
-                ets_printf("E(w): i=%d, cnt=%d val=%d\n\n", i, cnt, val);
+                esp_rom_printf("E(w): i=%d, cnt=%d val=%d\n\n", i, cnt, val);
                 args->result = ESP_FAIL;
                 goto close;
             }
@@ -845,7 +924,7 @@ static void read_write_task(void* param)
             uint32_t rval;
             int cnt = fread(&rval, sizeof(rval), 1, f);
             if (cnt != 1) {
-                ets_printf("E(r): i=%d, cnt=%d rval=%d\n\n", i, cnt, rval);
+                esp_rom_printf("E(r): i=%d, cnt=%d rval=%d\n\n", i, cnt, rval);
                 args->result = ESP_FAIL;
                 goto close;
             }
@@ -862,7 +941,9 @@ static void read_write_task(void* param)
     args->result = ESP_OK;
 
 close:
-    if(f) fclose(f);
+    if(f) {
+        TEST_ASSERT_EQUAL(0, fclose(f));
+    }
 
 done:
     xSemaphoreGive(args->done);
@@ -949,7 +1030,7 @@ static void test_littlefs_concurrent_rw(const char* filename_prefix)
 }
 
 #if CONFIG_LITTLEFS_SPIFFS_COMPAT
-TEST_CASE("SPIFFS COMPAT", "[littlefs]")
+TEST_CASE("SPIFFS COMPAT: file creation and deletion", "[littlefs]")
 {
     test_setup();
 
@@ -970,6 +1051,34 @@ TEST_CASE("SPIFFS COMPAT", "[littlefs]")
 
     test_teardown();
 }
+
+TEST_CASE("SPIFFS COMPAT: file creation and rename", "[littlefs]")
+{
+    test_setup();
+
+    int res;
+    char message[256];
+    const char* src = littlefs_base_path "/spiffs_compat/src/foo/bar/spiffs_compat.bin";
+    const char* dst = littlefs_base_path "/spiffs_compat/dst/foo/bar/spiffs_compat.bin";
+
+    FILE* f = fopen(src, "w");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_TRUE(fputs("bar", f) != EOF);
+    TEST_ASSERT_EQUAL(0, fclose(f));
+
+    res = rename(src, dst);
+    snprintf(message, sizeof(message), "errno: %d", errno);
+    TEST_ASSERT_EQUAL_MESSAGE(0, res, message);
+
+    /* check to see if all the directories were deleted */
+    struct stat sb;
+    if (stat(littlefs_base_path "/spiffs_compat/src", &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        TEST_FAIL_MESSAGE("Empty directories were not deleted");
+    }
+
+    test_teardown();
+}
+
 #endif  // CONFIG_LITTLEFS_SPIFFS_COMPAT
 
 TEST_CASE("Rewriting file frees space immediately (#7426)", "[littlefs]")
@@ -996,8 +1105,81 @@ TEST_CASE("Rewriting file frees space immediately (#7426)", "[littlefs]")
         for (size_t i = 0; i < kb_to_write; i++) {
             TEST_ASSERT_EQUAL_INT(1024, fwrite(buf, 1, 1024, f));
         }
-        fclose(f);
+        TEST_ASSERT_EQUAL(0, fclose(f));
     }
+    test_teardown();
+}
+
+TEST_CASE("esp_littlefs_info returns used_bytes > total_bytes", "[littlefs]")
+{
+    // https://github.com/joltwallet/esp_littlefs/issues/66
+    test_setup();
+    const char foo[] = "foofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoofoo";
+
+    char names[7][64];
+    for (size_t i = 0; i < 7; ++i) {
+        snprintf(names[i], sizeof(names[i]), littlefs_base_path "/%d", i + 1);
+        unlink(names[i]);  // Make sure these files don't exist
+
+        FILE* f = fopen(names[i], "wb");
+        TEST_ASSERT_NOT_NULL(f);
+        char val = 'c';
+        size_t n_bytes = 65432;
+        for(int i=0; i < n_bytes; i++) {
+            TEST_ASSERT_EQUAL(1, fwrite(&val, 1, 1, f));
+        }
+        TEST_ASSERT_EQUAL(0, fclose(f));
+    }
+
+    bool disk_full = false;
+    int i = 0;
+    while(!disk_full){
+        char *filename = names[i % 7];
+        FILE* f = fopen(filename, "a+b");
+        TEST_ASSERT_NOT_NULL(f);
+        size_t n_bytes = 200 + i % 17;
+        int amount_written = fwrite(foo, n_bytes, 1, f);
+        if(amount_written != 1) {
+            disk_full = true;
+        }
+        if(0 != fclose(f)){
+            disk_full = true;
+        }
+
+        size_t total = 0, used = 0;
+        TEST_ESP_OK(esp_littlefs_info(littlefs_test_partition_label, &total, &used));
+        TEST_ASSERT_GREATER_OR_EQUAL_INT(used, total);
+        //printf("used: %d total: %d\n", used, total);
+        i++;
+    }
+    test_teardown();
+}
+
+TEST_CASE("fcntl get flags", "[littlefs]")
+{
+    int fd;
+    int ret;
+
+    test_setup();
+
+    fd = open("/littlefs/test.txt", O_CREAT | O_WRONLY);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+    ret = fcntl(fd, F_GETFL);
+    TEST_ASSERT_EQUAL(O_WRONLY, ret);
+    close(fd);
+
+    fd = open("/littlefs/test.txt", O_RDONLY);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+    ret = fcntl(fd, F_GETFL);
+    TEST_ASSERT_EQUAL(O_RDONLY, ret);
+    close(fd);
+
+    fd = open("/littlefs/test.txt", O_RDWR);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+    ret = fcntl(fd, F_GETFL);
+    TEST_ASSERT_EQUAL(O_RDWR, ret);
+    close(fd);
+
     test_teardown();
 }
 
@@ -1018,4 +1200,3 @@ static void test_teardown(){
     TEST_ASSERT_TRUE( heap_caps_check_integrity_all(true) );
     printf("Test teardown complete.\n");
 }
-
