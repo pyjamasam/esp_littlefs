@@ -17,11 +17,15 @@ function(littlefs_create_partition_image partition base_dir)
 	partition_table_get_partition_info(size "--partition-name ${partition}" "size")
 	partition_table_get_partition_info(offset "--partition-name ${partition}" "offset")
 
-	add_custom_command(
-		OUTPUT ${MKLITTLEFS}
-		COMMAND make dist
-		WORKING_DIRECTORY ${MKLITTLEFS_DIR}
-	)
+	#Set BUILD_MKLITTLEFS to 0 if you want to skip building it
+	#Set MKLITTLEFS to be the path to the exe you want to use
+	IF ((NOT DEFINED BUILD_MKLITTLEFS) OR ${BUILD_MKLITTLEFS}==1)
+		add_custom_command(
+			OUTPUT ${MKLITTLEFS}
+			COMMAND make dist
+			WORKING_DIRECTORY ${MKLITTLEFS_DIR}
+		)
+	ENDIF()
 
 	if("${size}" AND "${offset}")
 		set(image_file ${CMAKE_BINARY_DIR}/${partition}.bin)
